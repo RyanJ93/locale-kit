@@ -1,0 +1,633 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const LocaleKit = require('./locale-kit.js');
+const sqlite3 = require('sqlite3').verbose();
+const filesystem = require('fs');
+const crypto = require('crypto');
+
+/**
+* @var Object actions An object containing a list of all supported actions, as value there is the count of all required parameters to pass in CLI and if an instance of the translator is required.
+*/
+var actions = {
+	create: {
+		requiredParams: 1,
+		obj: false
+	},
+	'translate-package': {
+		requiredParams: 1,
+		obj: true
+	},
+	translate: {
+		requiredParams: 2,
+		obj: true
+	},
+	detect: {
+		requiredParams: 1,
+		obj: true
+	},
+	list: {
+		requiredParams: 1,
+		obj: true
+	},
+	help: {
+		requiredParams: 0,
+		obj: false,
+		help: true
+	}
+};
+actions.man = actions['-man'] = actions['-help'] = actions['--man'] = actions['--help'] = actions['?'] = actions.help;
+
+var Helper = {
+	/**
+	* Establishes a connection with the package (SQLite 3 based database), this method is asynchronous with promise support.
+	*/
+	createDatabaseConnection: function(){
+		return new Promise((resolve, reject) => {
+			if ( typeof(process.argv[process.argv.length - 1]) !== 'string' || process.argv[process.argv.length - 1] === '' ){
+				console.log('Usage error: invalid path provided, aborting!');
+				process.exit(-1);
+			}
+			if ( options.overwrite === true ){
+				try{
+					if ( filesystem.existsSync(process.argv[process.argv.length - 1]) === true ){
+						filesystem.unlinkSync(process.argv[process.argv.length - 1]);
+					}
+				}catch(ex){
+					if ( options.verbose === true ){
+						console.log(ex);
+					}
+					console.log('An error occurred while trying to remove the existing database, aborting!');
+					process.exit(-1);
+				}
+			}
+			database = new sqlite3.Database(process.argv[process.argv.length - 1], (error) => {
+				if ( error !== null ){
+					if ( options.verbose === true ){
+						console.log(error);
+					}
+					console.log('Unable to open the database.');
+					process.exit(-1);
+				}
+				return resolve();
+			});
+		});
+	},
+	
+	/**
+	* Executes all queries on the database, this method is asynchronous with promise support.
+	*
+	* @param Array parameters A sequential array that contains the parameters for the SQL query.
+	*/
+	saveLabel: function(parameters){
+		return new Promise((resolve, reject) => {
+			database.run('INSERT OR REPLACE INTO labels (id, locale, value, locked) VALUES (?, ?, ?, ?);', parameters, (error, result) => {
+				if ( error !== null ){
+					if ( options.verbose === true ){
+						console.log(error);
+					}
+					console.log('An error occurred in database transaction, aborting!');
+					process.exit(-1);
+					return reject(error);
+				}
+				return resolve();
+			});
+		});
+	},
+	
+	/**
+	* Translates all the labels fetched from the package matching a specific locale, this method is asynchronous with promise support.
+	*
+	* @param Object locale An object containing both the locale name and ID.
+	* @param Array labels A sequential array containinig the lables information where each label is an array having as first element the label ID and as second element its informations (such as its value and if is locked or not).
+	* @param Number chunks An integer number greater than zero representing the number of chunks that the given array should be splitted in according with its length and the chunck size that has beeen defined.
+	*/
+	translateLocale: function(locale, labels, chunks){
+		return new Promise((resolve, reject) => {
+			let requests = new Array();
+			for ( let i = 0 ; i < chunks ; i++ ){
+				let start = i * options.chunk;
+				let buffer = labels.slice(start, start + options.chunk);
+				let texts = buffer.map((element) => {
+					return element[1].value;
+				});
+				requests.push(translator.translateText(texts, locale.locale, options.locale));
+			}
+			Promise.all(requests).then((elements) => {
+				elements.forEach((element, index) => {
+					for ( let key in element ){
+						for ( let i = 0 ; i < labels.length ; i++ ){
+							if ( labels[i][1].value === key ){
+								operations.push(new Array(labels[i][0], locale.id, element[key], labels[i][1].locked));
+								break;
+							}
+						}
+					}
+				});
+				console.log('Translated locale with code "' + locale.locale + '".');
+				return resolve();
+			}).catch((ex) => {
+				if ( options.verbose === true ){
+					console.log(ex);
+				}
+				return reject(ex);
+			});
+		});
+	}
+};
+
+let total = process.hrtime();
+if ( process.argv.length <= 0 ){
+	console.log('Usage error: locale-kit action [--options] [-params value] [path] [text] [locale] [original locale]');
+	process.exit(-1);
+}
+let options = {
+	numericIDs: true,
+	overwrite: false,
+	locale: null,
+	provider: LocaleKit.Translator.YANDEX,
+	token: null,
+	fill: false,
+	override: false,
+	locales: new Array(),
+	skipLocales: new Array(),
+	verbose: false,
+	chunk: 10,
+	originalLocale: null,
+	hints: null,
+	codes: false,
+	ui: 'en',
+	labels: new Array(),
+	ignoredLabels: new Array(),
+	format: 'text'
+};
+let skipNext = false, createObject = false;
+let translator = null, database = null, action = null;
+let operations = new Array();
+let acts = Object.keys(actions);
+for ( let i = 0 ; i < process.argv.length ; i++ ){
+	if ( acts.indexOf(process.argv[i]) !== -1 ){
+		action = process.argv[i];
+		break;
+	}
+	delete process.argv[i];
+}
+if ( action === null ){
+	console.log('Usage error: unsupported action, please use the action "help" to list supported actions, aborting!');
+	process.exit(-1);
+}
+process.argv = process.argv.filter(String);
+process.argv.forEach((element, index) => {
+	if ( element === '' ){
+		return;
+	}
+	if ( skipNext === true ){
+		return skipNext = false;
+	}
+	switch ( element ){
+		case '-token':{
+			let token = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( token === null || token === '' ){
+				console.log('Usage error: invalid API token, aborting!');
+				process.exit(-1);
+			}
+			options.token = token;
+			return skipNext = true;
+		}break;
+		case '-provider':{
+			let provider = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1].toLowerCase();
+			if ( provider === null || provider === '' || LocaleKit.Translator.supportedProvider(provider) === false ){
+				console.log('Usage error: unsupproted or invalid provider name, aborting!');
+				process.exit(-1);
+			}
+			options.provider = provider;
+			return skipNext = true;
+		}break;
+		case '-locale':{
+			let locale = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( locale === null || locale === '' ){
+				console.log('Usage error: invalid locale code, aborting!');
+				process.exit(-1);
+			}
+			options.locale = locale;
+			return skipNext = true;
+		}break;
+		case '-locales':{
+			if ( typeof(process.argv[index + 1]) === 'string' && process.argv.length >= ( index + actions[action].requiredParams + 1 ) && process.argv[index + 1] !== '' ){
+				process.argv[index + 1].split(',').forEach((locale) => {
+					let buffer = locale.trim().toLowerCase();
+					if ( buffer !== '' ){
+						options.locales.push(buffer);
+					}
+				});
+			}
+			return skipNext = true;
+		}break;
+		case '-skip-locales':{
+			if ( typeof(process.argv[index + 1]) === 'string' && process.argv.length >= ( index + actions[action].requiredParams + 1 ) && process.argv[index + 1] !== '' ){
+				process.argv[index + 1].split(',').forEach((locale) => {
+					let buffer = locale.trim().toLowerCase();
+					if ( buffer !== '' ){
+						options.skipLocales.push(buffer);
+					}
+				});
+			}
+			return skipNext = true;
+		}break;
+		case '--string-ids':{
+			return options.numericIDs = false;
+		}break;
+		case '--overwrite':{
+			return options.overwrite = true;
+		}break;
+		case '--fill':{
+			createObject = true;
+			return options.fill = true;
+		}break;
+		case '--verbose':{
+			return options.verbose = true;
+		}break;
+		case '--override':{
+			return options.override = true;
+		}break;
+		case '--codes':{
+			return options.codes = true;
+		}break;
+		case '-chunk':{
+			let chunk = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? 1 : parseInt(process.argv[index + 1]);
+			options.chunk = chunk === null || isNaN(chunk) === true || chunk <= 0 ? 1 : chunk;
+			return skipNext = true;
+		}break;
+		case '-original-locale':{
+			let originalLocale = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( originalLocale !== null && originalLocale !== '' ){
+				options.originalLocale = originalLocale;
+			}
+			return skipNext = true;
+		}break;
+		case '-hints':{
+			let hints = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( hints !== null && hints !== '' ){
+				hints.split(',').forEach((locale) => {
+					let buffer = locale.trim().toLowerCase();
+					if ( buffer !== '' ){
+						options.hints.push(buffer);
+					}
+				});
+			}
+			return skipNext = true;
+		}break;
+		case '-ui':{
+			let ui = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( ui !== null && ui !== '' ){
+				options.ui = ui;
+			}
+			return skipNext = true;
+		}break;
+		case '-labels':{
+			let labels = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( labels !== null && labels !== '' ){
+				labels.split(',').forEach((label) => {
+					let buffer = label.trim();
+					if ( buffer !== '' ){
+						options.labels.push(label);
+					}
+				});
+			}
+			return skipNext = true;
+		}break;
+		case '-ignored-labels':{
+			let ignoredLabels = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? null : process.argv[index + 1];
+			if ( ignoredLabels !== null && ignoredLabels !== '' ){
+				ignoredLabels.split(',').forEach((ignoredLabel) => {
+					let buffer = ignoredLabel.trim();
+					if ( buffer !== '' ){
+						options.ignoredLabels.push(ignoredLabel);
+					}
+				});
+			}
+			return skipNext = true;
+		}break;
+		case '-format':{
+			options.format = typeof(process.argv[index + 1]) !== 'string' || process.argv.length < ( index + actions[action].requiredParams + 1 ) ? 'text' : ( process.argv[index + 1].toLowerCase() === 'html' ? 'html' : 'text' );
+			return skipNext = true;
+		}break;
+	}
+});
+if ( typeof(actions[action].help) === 'undefined' ){
+	if ( createObject === true || actions[action].obj === true ){
+		if ( options.token === null ){
+			console.log('Usage error: no API token has been defined, aborting!');
+			process.exit(-1);
+		}
+		translator = new LocaleKit.Translator();
+		translator.setProvider(options.provider).setToken(options.token).setVerbose(options.verbose).setTextFormat(options.format);
+	}
+	switch ( action ){
+		case 'create':{
+			Helper.createDatabaseConnection().then(() => {
+				if ( options.fill === true && translator === null ){
+					console.log('Usage error: if you want to use the option "--fill" you must provide an API token, aborting!');
+					process.exit(-1);
+				}
+				if ( options.overwrite === false && filesystem.existsSync(process.argv[process.argv.length - 1]) === true ){
+					console.log('Cannot create the package because the package already exists, use the option "--overwrite" to overwrite it, aborting!');
+					process.exit(-1);
+				}
+				database.serialize(() => {
+					database.run('CREATE TABLE IF NOT EXISTS locales (id INTEGER NOT NULL, code TEXT NOT NULL, lang TEXT NOT NULL, locked BOOLEAN DEFAULT 0, PRIMARY KEY(id));');
+					database.run('CREATE TABLE IF NOT EXISTS meta (key TEXT NOT NULL, value TEXT, PRIMARY KEY(key));');
+					if ( options.numericIDs === true ){
+						database.run('CREATE TABLE IF NOT EXISTS labels (id INTEGER NOT NULL, locale INTEGER NOT NULL, value TEXT NOT NULL, locked BOOLEAN DEFAULT 0, PRIMARY KEY(id, locale));');
+					}else{
+						database.run('CREATE TABLE IF NOT EXISTS labels (id TEXT NOT NULL, locale INTEGER NOT NULL, value TEXT NOT NULL, locked BOOLEAN DEFAULT 0, PRIMARY KEY(id, locale));');
+					}
+					database.run('INSERT INTO meta (key, value) VALUES ("identifier", ?);', [crypto.createHash('md5').update(process.hrtime().toString()).digest('hex')]);
+					database.run('INSERT INTO meta (key, value) VALUES ("creator", "Locale kit");');
+					database.run('INSERT INTO meta (key, value) VALUES ("version", ?);', [LocaleKit.Package.VERSION]);
+					if ( options.fill === false ){
+						console.log(options.verbose === true ? ( 'Database created successfully in ' + ( process.hrtime(total)[1] / 1e9 ) + ' seconds.' ) : 'Database created successfully.');
+						process.exit(1);
+					}
+					translator.getSupportedLanguages('en').then((languages) => {
+						let statements = 0;
+						for ( let language in languages ){
+							let lang = language.indexOf('-');
+							database.run('INSERT INTO locales (code, lang, locked) VALUES (?, ?, 0);', [language, ( lang !== -1 ? language.substr(0, lang) : language )], (error) => {
+								if ( error !== null ){
+									if ( options.verbose === true ){
+										console.log(error);
+									}
+									console.log('An error occurred while creating the package, aborting!');
+									process.exit(-1);
+								}
+								statements--;
+								if ( statements === 0 ){
+									console.log(options.verbose === true ? ( 'Database created and filled successfully in ' + ( process.hrtime(total)[1] / 1e9 ) + ' seconds.' ) : 'Database created and filled successfully.');
+									process.exit(1);
+								}
+							});
+							statements++;
+						}
+					}).catch((ex) => {
+						if ( options.verbose === true ){
+							console.log(ex);
+						}
+						console.log('An error occurred while retrieving the list of the languages supported by the provider, aborting!');
+						process.exit(-1);
+					});
+				});
+			});
+		}break;
+		case 'translate-package':{
+			Helper.createDatabaseConnection().then(() => {
+				if ( translator === null ){
+					console.log('Usage error: no API key provided, aborting!');
+					process.exit(-1);
+				}
+				if ( options.locale === null ){
+					console.log('Usage error: no start locale code has been defined, aborting!');
+					process.exit(-1);
+				}
+				let time = process.hrtime();
+				database.all(( options.override === true ? 'SELECT id, code FROM locales;' : 'SELECT id, code FROM locales WHERE locked = 0;' ), (error, elements) => {
+					if ( error !== null ){
+						if ( options.verbose === true ){
+							console.log(error);
+						}
+						console.log('An error occurred in database transaction, aborting!');
+						process.exit(-1);
+					}
+					let id = null;
+					let locales = new Array();
+					if ( options.locales.length > 0 ){
+						elements.forEach((element, index) => {
+							if ( element.code !== options.locale && options.locales.indexOf(element.code) !== -1 ){
+								locales.push({
+									id: element.id,
+									locale: element.code
+								});
+								return;
+							}
+							if ( element.code === options.locale ){
+								id = element.id;
+							}
+						});
+					}else{
+						elements.forEach((element, index) => {
+							if ( element.code === options.locale ){
+								id = element.id;
+								return;
+							}
+							locales.push({
+								id: element.id,
+								locale: element.code
+							});
+						});
+					}
+					if ( options.skipLocales.length !== 0 ){
+						locales = locales.map((element, index) => {
+							if ( options.skipLocales.indexOf(element.locale) === -1 ){
+								return element;
+							}
+						});
+					}
+					if ( id === null ){
+						console.log('The given locale is not supported by this package, aborting!');
+						process.exit(-1);
+					}
+					if ( locales.length === 0 ){
+						console.log('No locale is going to be translated, exiting!');
+						process.exit(-1);
+					}
+					console.log(options.verbose === true ? ( 'Selected ' + locales.length + ' locales in ' + ( process.hrtime(time)[1] / 1e9 ) + ' seconds, checking provider support...' ) : ( 'Selected ' + locales.length + ' locales, checking provider support...' ) );
+					time = process.hrtime();
+					let supportedLanguages = new Array();
+					translator.getSupportedLanguages('en').then((elements) => {
+						elements = Object.keys(elements);
+						locales = locales.map((element, index) => {
+							if ( element !== null && typeof(element) === 'object' && typeof(element.locale) === 'string' && elements.indexOf(element.locale) !== -1 ){
+								return element;
+							}
+						});
+						if ( locales.length === 0 ){
+							console.log('No locale is going to be translated, exiting!');
+							process.exit(-1);
+						}
+						let supported = false;
+						for ( let i = 0 ; i < elements.length ; i++ ){
+							if ( elements[i] === options.locale ){
+								supported = true;
+								break;
+							}
+						}
+						if ( supported === false ){
+							console.log('The given locale is not supported by the provider, aborting!');
+							process.exit(-1);
+						}
+						locales = locales.filter((element) => {
+							return typeof(element) === 'object' && element !== null ? true : false;
+						});
+						if ( options.verbose === true ){
+							console.log('Language list obtained in ' + ( process.hrtime(time)[1] / 1e9 ) + ' seconds.');
+							time = process.hrtime();
+						}
+						console.log('Starting translating ' + locales.length + ' locales...');
+						console.log('Loading labels...');
+						let query = 'SELECT id, value, locked FROM labels WHERE locale = ?';
+						let params = new Array();
+						params.push(id);
+						if ( options.override !== true ){
+							query += ' AND locked = 0';
+						}
+						if ( options.labels.length > 0 ){
+							query += ' AND id IN(' + options.labels.map((element) => {
+								params.push(element);
+								return '?';
+							}).join(',') + ')';
+						}
+						if ( options.ignoredLabels.length > 0 ){
+							query += ' AND id NOT IN(' + options.ignoredLabels.map((element) => {
+								params.push(element);
+								return '?';
+							}).join(',') + ')';
+						}
+						database.all(query + ' ORDER BY id ASC;', params, (error, elements) => {
+							if ( error !== null ){
+								if ( options.verbose === true ){
+									console.log(error);
+								}
+								console.log('An error occurred in database transaction, aborting!');
+								process.exit(-1);
+							}
+							if ( elements.length === 0 ){
+								console.log('No label found, exiting.');
+								process.exit(-1);
+							}
+							console.log(options.verbose === true ? ( 'Found ' + elements.length + ' labels in ' + ( process.hrtime(time)[1] / 1e9 ) + ' seconds.' ) : ( 'Found ' + elements.length + ' labels.' ) );
+							time = process.hrtime();
+							let buffer = {};
+							elements.forEach((element, index) => {
+								buffer[element.id] = {
+									value: element.value,
+									locked: options.override === true || element.locked !== 1 ? 0 : 1
+								};
+							});
+							elements = buffer;
+							let requests = new Array();
+							elements = Object.entries(elements);
+							let chunks = Math.floor(elements.length / options.chunk) + 1;
+							locales.forEach((element, index) => {
+								let request = Helper.translateLocale(element, elements, chunks);
+								requests.push(request);
+							});
+							Promise.all(requests).then((results) => {
+								console.log(options.verbose === true ? ( 'All labels have been translated in ' + ( process.hrtime(time)[1] / 1e9 ) + ' seconds, updating texts...' ) : ( 'All labels have been translated, updating texts...' ) );
+								time = process.hrtime()[1];
+								requests = new Array();
+								operations.forEach((element, index) => {
+									let request = Helper.saveLabel(element);
+									requests.push(request);
+								});
+								Promise.all(requests).then((results) => {
+									database.run('INSERT OR REPLACE INTO meta (key, value) VALUES ("last_translation", ?);', [Math.round(new Date().getTime()/1000).toString()]);
+									database.run('INSERT OR REPLACE INTO meta (key, value) VALUES ("identifier", ?);', [crypto.createHash('md5').update(process.hrtime().toString()).digest('hex')]);
+									console.log(options.verbose === true ? ( 'All operations done ' + ( process.hrtime(total)[1] / 1e9 ) + ' seconds.' ) : ( 'All operations done.' ) );
+									process.exit(1);
+								}).catch((ex) => {
+									if ( options.verbose === true ){
+										console.log(ex);
+									}
+									conole.log('An error occurred while saving the translated labels, aborting!');
+									process.exit(-1);
+								});
+							}).catch((ex) => {
+								if ( options.verbose === true ){
+									console.log(ex);
+								}
+								console.log('An error occurred while translating the labels, aborting!');
+								process.exit(-1);
+							});
+						});
+					}).catch((ex) => {
+						if ( options.verbose === true ){
+							console.log(ex);
+						}
+						console.log('An error occurred while getting the list of supported languages from the provider, aborting!');
+						process.exit(-1);
+					});
+				});
+			});
+		}break;
+		case 'translate':{
+			translator.translateText(new Array(process.argv[process.argv.length - 2]), process.argv[process.argv.length - 1], options.originalLocale, true).then((elements) => {
+				console.log(Object.values(elements)[0]);
+				process.exit(1);
+			}).catch((ex) => {
+				if ( options.verbose === true ){
+					console.log(ex);
+				}
+				console.log('An error occurred while translating the text, aborting!');
+				process.exit(-1);
+			});
+		}break;
+		case 'detect':{
+			translator.detectLanguage(new Array(process.argv[process.argv.length - 2]), options.hints, true).then((elements) => {
+				console.log(Object.values(elements)[0]);
+				process.exit(1);
+			}).catch((ex) => {
+				if ( options.verbose === true ){
+					console.log(ex);
+				}
+				console.log('An error occurred while detecting the language of the given text, aborting!');
+				process.exit(-1);
+			});
+		}break;
+		case 'list':{
+			translator.getSupportedLanguages(options.ui).then((elements) => {
+				console.log('Supported languages: ' + ( options.codes === true ? Object.keys(elements) : Object.values(elements) ).join(', '));
+				process.exit(1);
+			}).catch((ex) => {
+				if ( options.verbose === true ){
+					console.log(ex);
+				}
+				console.log('An error occurred while getting the list of all supported languages from the provider, aborting!');
+				process.exit(-1);
+			});
+		}break;
+	}
+}else{
+	console.log('This utility is shipped as part of the "locale-kit" package.');
+	console.log('You can use this utility to create and translate packages stored as SQLite database.');
+	console.log('Usage: ./locale-kit action [--options] [-params value] [path] [text] [locale] [original locale]');
+	console.log('\nAvailable actions:\n');
+	console.log('\tcreate: Creates a new package (as SQLite database file), if it already exists, an error will be thrown, unless you set the "--overwrite" option.');
+	console.log('\translate-package: Translates the package according to the given options.');
+	console.log('\translate: Translates a given text to a given locale, optionally you can specify the language of the input text.');
+	console.log('\tdetect: Detects the language of a given text.');
+	console.log('\tlist: Returns a list of all the locales supported by the service provider in use.');
+	console.log('\thelp: Displays the documentation page.');
+	console.log('\tman: Alias for "help".');
+	console.log('\nAvailable parameters:\n');
+	console.log('\t-token: The API key for the selected provider, this is required to use every service provider.');
+	console.log('\t-provider: The name of the provider to use, by default, "Yandex" is used, currently supported providers are only "Google" (paid) and "Yandex" (10M chars/month free then paid), names are case-insensitive.');
+	console.log('\t-locale: The start locale code used in package translation, note that this locale must be supported by both the package and the provider.');
+	console.log('\t-locales: A list of the locales that must be translated, multiple locale codes can be separated by a comma, note that the specified locales must be supported by both the package and the service provider.');
+	console.log('\t-skip-locales: A list of the locales that must not be translated, multiple locale codes can be separated by a comma.');
+	console.log('\t-chunk: An integer number that specifies how many labels should be translated for each request, use 1 to send a single request for each label, by default 10 is used.');
+	console.log('\t-original-locale: The language of the given text, note that this option is considered only when using the actions "translate" and "detect".');
+	console.log('\t-hints: One or more locale codes that will be sent as probably locales for language detection, note that this option is considered only when using "detect" as action and Yandex as service provider, you can set multiple codes by separating them with a comma.');
+	console.log('\t-ui: The language in which the language names should be returned, this option is considered only when using the actions "list".');
+	console.log('\t-labels: One of more label IDs that will be translated instead of translating all the labels contained in the package.');
+	console.log('\t-ignored-labels: One of more label IDs that will not be translated.');
+	console.log('\t-format: A string containing the name of the format of the text contained within the package, currently HTML and text are the only formats supported, by default text is used.');
+	console.log('\nAvailable options:\n');
+	console.log('\t--string-ids: Using this option it means that label identifiers are represented by strings instead of integer numbers.');
+	console.log('\t-overwrite: Using this option in package creation it means that if a package with the same path is already existing it will be overwritten, otherwise an error will be thrown.');
+	console.log('\t--fill: In package creation, with this option the table that contains the supported locales will be filled with all supported locales of the given provider, note that the default provider is Yandex.');
+	console.log('\t--verbose: Using this option, all errors will be logged to the console, this can be helpful in debug.');
+	console.log('\t--override: Using this option, locked locales and labels will be translated as well, otherwise they will be skipped.');
+	console.log('\t--codes: Using this option, when retrieving the list of all the languages supported by the provider, will be returned a list of locale codes, otherwise the list of the language names.');
+	process.exit(1);
+}
