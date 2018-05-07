@@ -10,7 +10,7 @@ Before installing the package, make sure that the `sqlite3` module is installed,
 npm install locale-kit
 ````
 
-## Usage: Package
+## Usage: Package
 
 The class "Package" allows to fetch the labels from the language package, before using it you need, of course, to set up the path to the package and the locale to use, the locale must be supported by the package, you can set a locale and allows to the library to switch to a fallback locale based on the language of the given locale code, for example, if you set "en-US" as locale but the package doesn't support it, the library will look for any locale matching with "en", unless the strict mode is enable, here you are an example:
 
