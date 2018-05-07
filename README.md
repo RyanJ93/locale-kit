@@ -1,6 +1,14 @@
 # Locale Kit
 
-Locale Kit is a simple library that allows to manage language packages based on SQLite3 database. It provide also utilities that allow to translate texts as well as detect their language supporting Google and Yandex as service provider.
+Locale Kit is a simple library that allows to manage language packages based on SQLite3 database. It provide also utilities that allow to translate texts as well as detect their language supporting Google and Yandex as service provider. The package is shipped with a CLI utility that allows to create and translate language packages, for more information and documentation check the file called "cli.md".
+
+## Installation
+
+Before installing the package, make sure that the `sqlite3` module is installed, if you are going to install the library through a package manager, the dependence will be installed automatically. To install this package through NPM just run this command:
+
+````bash
+npm install locale-kit
+````
 
 ## Usage: Package
 
