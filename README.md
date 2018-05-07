@@ -62,7 +62,7 @@ The class "Translator" allows to translate and detect the language of texts, as 
 ````javascript
 let translator = new LocaleKit.Translator();
 //token, text format
-translator.setupYandex(['YOUR API TOKEN HERE'], LocaleKit.Translator.HTML);
+translator.setupYandex('YOUR API TOKEN HERE', LocaleKit.Translator.HTML);
 ````
 
 Now you can translate one or more texts using this method:
@@ -97,7 +97,16 @@ translator.getSupportedLanguages('en').then((languages) => {
 });
 ````
 
-Both the classes support cache, data caching is provided by the module "tiny-cacher", you can find more information about it on its [repository on GitHub](https://github.com/RyanJ93/tiny-cacher).
+Both the classes support data caching, you can set up cache using these methods:
+
+````javascript
+//Setup cached for the package.
+pack.setCache(true).setCacheHandler(cache);
+//Setup cached for the translator.
+translator.setCache(true).setCacheHandler(cache);
+````
+
+Data caching is provided by the module "tiny-cacher", as you can see in the examples, the variable "cache" is an instance of the class "TinyCacher" that allows to store data using different options such as Redis, Memcached and file. You can find more information about it on its [repository on GitHub](https://github.com/RyanJ93/tiny-cacher).
 
 If you like this project and think that is useful don't be scared and feel free to contribute reporting bugs, issues or suggestions or if you feel generous, you can send a donation [here](https://www.enricosola.com/about#donations).
 
